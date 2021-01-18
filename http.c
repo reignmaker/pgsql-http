@@ -129,7 +129,7 @@ static http_curlopt settable_curlopts[] = {
 	{ "CURLOPT_TIMEOUT", NULL, CURLOPT_TIMEOUT, CURLOPT_LONG, false },
 	{ "CURLOPT_TIMEOUT_MS", NULL, CURLOPT_TIMEOUT_MS, CURLOPT_LONG, false },
 	{ "CURLOPT_CONNECTTIMEOUT", NULL, CURLOPT_CONNECTTIMEOUT, CURLOPT_LONG, false },
-    { "CURLOPT_USERAGENT", NULL, CURLOPT_USERAGENT, CURLOPT_STRING, false },
+	{ "CURLOPT_USERAGENT", NULL, CURLOPT_USERAGENT, CURLOPT_STRING, false },
 	{ "CURLOPT_IPRESOLVE", NULL, CURLOPT_IPRESOLVE, CURLOPT_LONG, false },
 #if LIBCURL_VERSION_NUM >= 0x070903 /* 7.9.3 */
 	{ "CURLOPT_SSLCERTTYPE", NULL, CURLOPT_SSLCERTTYPE, CURLOPT_STRING, false },
@@ -167,8 +167,8 @@ static http_curlopt settable_curlopts[] = {
 	{ "CURLOPT_PROXY_TLSAUTH_PASSWORD", NULL, CURLOPT_PROXY_TLSAUTH_PASSWORD, CURLOPT_STRING, false },
 	{ "CURLOPT_PROXY_TLSAUTH_TYPE", NULL, CURLOPT_PROXY_TLSAUTH_TYPE, CURLOPT_STRING, false },
 #endif
-        { "CURLOPT_USERNAME", NULL, CURLOPT_USERNAME, CURLOPT_STRING, false },
-        { "CURLOPT_PASSWORD", NULL, CURLOPT_PASSWORD, CURLOPT_STRING, false },
+	{ "CURLOPT_USERNAME", NULL, CURLOPT_USERNAME, CURLOPT_STRING, false },
+	{ "CURLOPT_PASSWORD", NULL, CURLOPT_PASSWORD, CURLOPT_STRING, false },
 	{ NULL, NULL, 0, 0, false } /* Array null terminator */
 };
 
@@ -596,12 +596,12 @@ typname_get_tupledesc(const char *extname, const char *typname)
 
 #if PG_VERSION_NUM >= 120000
 		Oid typoid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
-		                PointerGetDatum(typname),
-		                ObjectIdGetDatum(typnamespace));
+						PointerGetDatum(typname),
+						ObjectIdGetDatum(typnamespace));
 #else
 		Oid typoid = GetSysCacheOid2(TYPENAMENSP,
-		                PointerGetDatum(typname),
-		                ObjectIdGetDatum(typnamespace));
+						PointerGetDatum(typname),
+						ObjectIdGetDatum(typnamespace));
 #endif
 
 		if ( OidIsValid(typoid) )
@@ -769,8 +769,8 @@ http_get_handle()
 	curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 1);
 	curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, 5000);
 
-    /* Set the user agent. If not set, use PG_VERSION as default */
-    curl_easy_setopt(handle, CURLOPT_USERAGENT, PG_VERSION_STR);
+	/* Set the user agent. If not set, use PG_VERSION as default */
+	curl_easy_setopt(handle, CURLOPT_USERAGENT, PG_VERSION_STR);
 
 	if (!handle)
 		ereport(ERROR, (errmsg("Unable to initialize CURL")));
@@ -819,7 +819,7 @@ PG_FUNCTION_INFO_V1(http_list_curlopt);
 Datum http_list_curlopt(PG_FUNCTION_ARGS)
 {
 	struct list_state {
-	    size_t i; /* read position */
+		size_t i; /* read position */
 	};
 
 	MemoryContext oldcontext, newcontext;
@@ -830,25 +830,25 @@ Datum http_list_curlopt(PG_FUNCTION_ARGS)
 
 	if (SRF_IS_FIRSTCALL())
 	{
-        funcctx = SRF_FIRSTCALL_INIT();
+		funcctx = SRF_FIRSTCALL_INIT();
 		newcontext = funcctx->multi_call_memory_ctx;
 		oldcontext = MemoryContextSwitchTo(newcontext);
 		state = palloc0(sizeof(*state));
 		funcctx->user_fctx = state;
 		if(get_call_result_type(fcinfo, 0, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
 			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg("composite-returning function called in context that cannot accept a composite")));
+				errmsg("composite-returning function called in context that cannot accept a composite")));
 
-        BlessTupleDesc(funcctx->tuple_desc);
-        MemoryContextSwitchTo(oldcontext);
-    }
+		BlessTupleDesc(funcctx->tuple_desc);
+		MemoryContextSwitchTo(oldcontext);
+	}
 
-    funcctx = SRF_PERCALL_SETUP();
-    state = funcctx->user_fctx;
+	funcctx = SRF_PERCALL_SETUP();
+	state = funcctx->user_fctx;
 
 	while (1)
 	{
-	    Datum result;
+		Datum result;
 		HeapTuple tuple;
 		text *option, *value;
 		http_curlopt *opt = settable_curlopts + state->i++;
@@ -861,8 +861,8 @@ Datum http_list_curlopt(PG_FUNCTION_ARGS)
 		vals[0] = PointerGetDatum(option);
 		vals[1] = PointerGetDatum(value);
 		nulls[0] = nulls[1] = 0;
-        tuple = heap_form_tuple(funcctx->tuple_desc, vals, nulls);
-        result = HeapTupleGetDatum(tuple);
+		tuple = heap_form_tuple(funcctx->tuple_desc, vals, nulls);
+		result = HeapTupleGetDatum(tuple);
 		SRF_RETURN_NEXT(funcctx, result);
 	}
 
