@@ -1,6 +1,6 @@
 # PostgreSQL HTTP Client
 
-[![Build Status](https://api.travis-ci.org/pramsey/pgsql-http.svg?branch=master)](https://travis-ci.org/pramsey/pgsql-http)
+[![CI](https://github.com/pramsey/pgsql-http/workflows/CI/badge.svg?branch=master)](https://github.com/pramsey/pgsql-http/actions?query=branch%3Amaster)
 
 ## Motivation
 
@@ -9,6 +9,8 @@ Wouldn't it be nice to be able to write a trigger that called a web service? Eit
 This extension is for that.
 
 ## Examples
+
+URL encode a string.
 
 ```sql
 SELECT urlencode('my special string''s & things?');
@@ -19,23 +21,43 @@ SELECT urlencode('my special string''s & things?');
  my+special+string%27s+%26+things%3F
 (1 row)
 ```
+
+URL encode a JSON associative array.
+
 ```sql
-SELECT content FROM http_get('http://httpbin.org/ip');
+SELECT urlencode(jsonb_build_object('name','Colin & James','rate','50%'));
+```
+```
+              urlencode
+-------------------------------------
+ name=Colin+%26+James&rate=50%25
+(1 row)
+```
+
+Run a GET request and see the content.
+
+```sql
+SELECT content
+  FROM http_get('http://httpbun.com/ip');
 ```
 ```
            content
 -----------------------------
- {"origin":"24.69.186.43"}                          +
+ {"origin":"24.69.186.43"}
 (1 row)
 ```
+
+Run a GET request with an Authorization header.
+
 ```sql
-SELECT content::json->'headers'->>'Authorization' FROM http((
+SELECT content::json->'headers'->>'Authorization'
+  FROM http((
           'GET',
-           'http://httpbin.org/headers',
+           'http://httpbun.com/headers',
            ARRAY[http_header('Authorization','Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9')],
            NULL,
            NULL
-        )::http_request)
+        )::http_request);
 ```
 ```
                    content
@@ -43,8 +65,12 @@ SELECT content::json->'headers'->>'Authorization' FROM http((
  Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9
 (1 row)
 ```
+
+Read the `status` and `content` fields out of a `http_response` object.
+
 ```sql
-SELECT status, content_type FROM http_get('http://httpbin.org/');
+SELECT status, content_type
+  FROM http_get('http://httpbun.com/');
 ```
 ```
  status |       content_type
@@ -52,91 +78,104 @@ SELECT status, content_type FROM http_get('http://httpbin.org/');
     200 | text/html; charset=utf-8
 (1 row)
 ```
+
+Show all the `http_header` in an `http_response` object.
+
 ```sql
-SELECT (unnest(headers)).* FROM http_get('http://httpbin.org/');
+SELECT (unnest(headers)).*
+  FROM http_get('http://httpbun.com/');
 ```
 ```
-              field               |             value
-----------------------------------+-------------------------------
- Connection                       | close
- Server                           | meinheld/0.6.1
- Date                             | Tue, 09 Jan 2018 18:40:30 GMT
- Content-Type                     | text/html; charset=utf-8
- Content-Length                   | 13011
- Access-Control-Allow-Origin      | *
- Access-Control-Allow-Credentials | true
- X-Powered-By                     | Flask
- X-Processed-Time                 | 0.0208520889282
- Via                              | 1.1 vegur
+      field       |                      value
+------------------+--------------------------------------------------
+ Server           | nginx
+ Date             | Wed, 26 Jul 2023 19:52:51 GMT
+ Content-Type     | text/html
+ Content-Length   | 162
+ Connection       | close
+ Location         | https://httpbun.org
+ server           | nginx
+ date             | Wed, 26 Jul 2023 19:52:51 GMT
+ content-type     | text/html
+ x-powered-by     | httpbun/3c0dc05883dd9212ac38b04705037d50b02f2596
+ content-encoding | gzip
 ```
+
+Use the PUT command to send a simple text document to a server.
+
 ```sql
 SELECT status, content_type, content::json->>'data' AS data
-  FROM http_put('http://httpbin.org/put', 'some text', 'text/plain');
+  FROM http_put('http://httpbun.com/put', 'some text', 'text/plain');
 ```
 ```
  status |   content_type   |   data
 --------+------------------+-----------
     200 | application/json | some text
 ```
+
+Use the PATCH command to send a simple JSON document to a server.
+
 ```sql
 SELECT status, content_type, content::json->>'data' AS data
-  FROM http_patch('http://httpbin.org/patch', '{"this":"that"}', 'application/json');
+  FROM http_patch('http://httpbun.com/patch', '{"this":"that"}', 'application/json');
 ```
 ```
  status |   content_type   |      data
 --------+------------------+------------------
     200 | application/json | '{"this":"that"}'
 ```
+
+Use the DELETE command to request resource deletion.
+
 ```sql
 SELECT status, content_type, content::json->>'url' AS url
-  FROM http_delete('http://httpbin.org/delete');
+  FROM http_delete('http://httpbun.com/delete');
 ```
 ```
  status |   content_type   |            url
 --------+------------------+---------------------------
-    200 | application/json | http://httpbin.org/delete
+    200 | application/json | http://httpbun.com/delete
 ```
 
-To POST to a URL using a data payload instead of parameters embedded in the URL, use the `application/x-www-form-urlencoded` content type.
+As a shortcut to send data to a GET request, pass a JSONB data argument.
 
 ```sql
-SELECT status, content::json->>'form'
-  FROM http_post('http://httpbin.org/post',
-                 'myvar=myval&foo=bar',
-                 'application/x-www-form-urlencoded');
+SELECT status, content::json->'args' AS args
+  FROM http_get('http://httpbun.com/get',
+                jsonb_build_object('myvar','myval','foo','bar'));
 ```
 
-Remember to [URL encode](http://en.wikipedia.org/wiki/Percent-encoding) content that includes any "special" characters (really, anything other than a-z and 0-9).
+To POST to a URL using a data payload instead of parameters embedded in the URL, encode the data in a JSONB as a data payload.
 
 ```sql
-SELECT status, content::json->>'form'
-  FROM http_post('http://httpbin.org/post',
-                 'myvar=' || urlencode('my special string & things?'),
-                 'application/x-www-form-urlencoded');
+SELECT status, content::json->'form' AS form
+  FROM http_post('http://httpbun.com/post',
+                 jsonb_build_object('myvar','myval','foo','bar'));
 ```
 
-To access binary content, you must coerce the content from the default `varchar` representation to a `bytea` representation using the `textsend` function. Using the default `varchar::bytea` cast will not work, as the cast will stop the first time it hits a zero-valued byte (common in binary data).
+To access binary content, you must coerce the content from the default `varchar` representation to a `bytea` representation using the `text_to_bytea()` function, or the `textsend()` function. Using the default `varchar::bytea` cast will **not work**, as the cast will stop the first time it hits a zero-valued byte (common in binary data).
 
 ```sql
 WITH
   http AS (
-    SELECT * FROM http_get('http://httpbin.org/image/png')
+    SELECT * FROM http_get('https://httpbingo.org/image/png')
   ),
   headers AS (
     SELECT (unnest(headers)).* FROM http
   )
 SELECT
   http.content_type,
-  length(textsend(http.content)) AS length_binary,
-  headers.value AS length_headers
+  length(text_to_bytea(http.content)) AS length_binary
 FROM http, headers
-WHERE field = 'Content-Length';
+WHERE field ilike 'Content-Type';
 ```
 ```
- content_type | length_binary | length_headers
---------------+---------------+----------------
- image/png    |          8090 | 8090
+ content_type | length_binary
+--------------+---------------
+ image/png    |          8090
 ```
+Similarly, when using POST to send `bytea` binary content to a service, use the `bytea_to_text` function to prepare the content.
+
 To access only the headers you can do a HEAD-Request. This will not follow redirections.
 
 ```sql
@@ -151,9 +190,9 @@ FROM
         ON true;
 ```
 ```
- status |                         location
---------+-----------------------------------------------------------
-    302 | http://www.google.ch/?gfe_rd=cr&ei=ACESWLy_KuvI8zeghL64Ag
+ status |        location
+--------+------------------------
+    301 | http://www.google.com/
 ```
 
 ## Concepts
@@ -194,46 +233,51 @@ As seen in the examples, you can unspool the array of `http_header` tuples into 
 * `http_header(field VARCHAR, value VARCHAR)` returns `http_header`
 * `http(request http_request)` returns `http_response`
 * `http_get(uri VARCHAR)` returns `http_response`
+* `http_get(uri VARCHAR, data JSONB)` returns `http_response`
 * `http_post(uri VARCHAR, content VARCHAR, content_type VARCHAR)` returns `http_response`
+* `http_post(uri VARCHAR, data JSONB)` returns `http_response`
 * `http_put(uri VARCHAR, content VARCHAR, content_type VARCHAR)` returns `http_response`
 * `http_patch(uri VARCHAR, content VARCHAR, content_type VARCHAR)` returns `http_response`
-* `http_delete(uri VARCHAR)` returns `http_response`
+* `http_delete(uri VARCHAR, content VARCHAR, content_type VARCHAR))` returns `http_response`
 * `http_head(uri VARCHAR)` returns `http_response`
 * `http_set_curlopt(curlopt VARCHAR, value varchar)` returns `boolean`
 * `http_reset_curlopt()` returns `boolean`
 * `http_list_curlopt()` returns `setof(curlopt text, value text)`
 * `urlencode(string VARCHAR)` returns `text`
+* `urlencode(data JSONB)` returns `text`
 
 ## CURL Options
 
-Select [CURL options](https://curl.haxx.se/libcurl/c/curl_easy_setopt.html) are available to set using the `http_set_curlopt(curlopt VARCHAR, value varchar)` function.
+Select [CURL options](https://curl.se/libcurl/c/curl_easy_setopt.html) are available to set using the `http_set_curlopt(curlopt VARCHAR, value varchar)` function.
 
-* [CURLOPT_DNS_SERVERS](https://curl.haxx.se/libcurl/c/CURLOPT_DNS_SERVERS.html)
-* [CURLOPT_PROXY](https://curl.haxx.se/libcurl/c/CURLOPT_PROXY.html)
-* [CURLOPT_PRE_PROXY](https://curl.haxx.se/libcurl/c/CURLOPT_PRE_PROXY.html)
-* [CURLOPT_PROXYPORT](https://curl.haxx.se/libcurl/c/CURLOPT_PROXYPORT.html)
-* [CURLOPT_PROXYUSERPWD](https://curl.haxx.se/libcurl/c/CURLOPT_PROXYUSERPWD.html)
-* [CURLOPT_PROXYUSERNAME](https://curl.haxx.se/libcurl/c/CURLOPT_PROXYUSERNAME.html)
-* [CURLOPT_PROXYPASSWORD](https://curl.haxx.se/libcurl/c/CURLOPT_PROXYPASSWORD.html)
-* [CURLOPT_PROXY_TLSAUTH_USERNAME](https://curl.haxx.se/libcurl/c/CURLOPT_PROXY_TLSAUTH_USERNAME.html)
-* [CURLOPT_PROXY_TLSAUTH_PASSWORD](https://curl.haxx.se/libcurl/c/CURLOPT_PROXY_TLSAUTH_PASSWORD.html)
-* [CURLOPT_PROXY_TLSAUTH_TYPE](https://curl.haxx.se/libcurl/c/CURLOPT_PROXY_TLSAUTH_TYPE.html)
-* [CURLOPT_TLSAUTH_USERNAME](https://curl.haxx.se/libcurl/c/CURLOPT_TLSAUTH_USERNAME.html)
-* [CURLOPT_TLSAUTH_PASSWORD](https://curl.haxx.se/libcurl/c/CURLOPT_TLSAUTH_PASSWORD.html)
-* [CURLOPT_TLSAUTH_TYPE](https://curl.haxx.se/libcurl/c/CURLOPT_TLSAUTH_TYPE.html)
-* [CURLOPT_SSL_VERIFYHOST](https://curl.haxx.se/libcurl/c/CURLOPT_SSL_VERIFYHOST.html)
-* [CURLOPT_SSL_VERIFYPEER](https://curl.haxx.se/libcurl/c/CURLOPT_SSL_VERIFYPEER.html)
-* [CURLOPT_SSLCERT](https://curl.haxx.se/libcurl/c/CURLOPT_SSLCERT.html)
-* [CURLOPT_SSLKEY](https://curl.haxx.se/libcurl/c/CURLOPT_SSLKEY.html)
-* [CURLOPT_SSLCERTTYPE](https://curl.haxx.se/libcurl/c/CURLOPT_SSLCERTTYPE.html)
-* [CURLOPT_CAINFO](https://curl.haxx.se/libcurl/c/CURLOPT_CAINFO.html)
-* [CURLOPT_TIMEOUT](https://curl.haxx.se/libcurl/c/CURLOPT_TIMEOUT.html)
-* [CURLOPT_TIMEOUT_MS](https://curl.haxx.se/libcurl/c/CURLOPT_TIMEOUT_MS.html)
-* [CURLOPT_TCP_KEEPALIVE](https://curl.haxx.se/libcurl/c/CURLOPT_TCP_KEEPALIVE.html)
-* [CURLOPT_TCP_KEEPIDLE](https://curl.haxx.se/libcurl/c/CURLOPT_TCP_KEEPIDLE.html)
-* [CURLOPT_CONNECTTIMEOUT](https://curl.haxx.se/libcurl/c/CURLOPT_CONNECTTIMEOUT.html)
-* [CURLOPT_USERAGENT](https://curl.haxx.se/libcurl/c/CURLOPT_USERAGENT.html)
-
+* [CURLOPT_DNS_SERVERS](https://curl.se/libcurl/c/CURLOPT_DNS_SERVERS.html)
+* [CURLOPT_PROXY](https://curl.se/libcurl/c/CURLOPT_PROXY.html)
+* [CURLOPT_PRE_PROXY](https://curl.se/libcurl/c/CURLOPT_PRE_PROXY.html)
+* [CURLOPT_PROXYPORT](https://curl.se/libcurl/c/CURLOPT_PROXYPORT.html)
+* [CURLOPT_PROXYUSERPWD](https://curl.se/libcurl/c/CURLOPT_PROXYUSERPWD.html)
+* [CURLOPT_PROXYUSERNAME](https://curl.se/libcurl/c/CURLOPT_PROXYUSERNAME.html)
+* [CURLOPT_PROXYPASSWORD](https://curl.se/libcurl/c/CURLOPT_PROXYPASSWORD.html)
+* [CURLOPT_PROXY_TLSAUTH_USERNAME](https://curl.se/libcurl/c/CURLOPT_PROXY_TLSAUTH_USERNAME.html)
+* [CURLOPT_PROXY_TLSAUTH_PASSWORD](https://curl.se/libcurl/c/CURLOPT_PROXY_TLSAUTH_PASSWORD.html)
+* [CURLOPT_PROXY_TLSAUTH_TYPE](https://curl.se/libcurl/c/CURLOPT_PROXY_TLSAUTH_TYPE.html)
+* [CURLOPT_TLSAUTH_USERNAME](https://curl.se/libcurl/c/CURLOPT_TLSAUTH_USERNAME.html)
+* [CURLOPT_TLSAUTH_PASSWORD](https://curl.se/libcurl/c/CURLOPT_TLSAUTH_PASSWORD.html)
+* [CURLOPT_TLSAUTH_TYPE](https://curl.se/libcurl/c/CURLOPT_TLSAUTH_TYPE.html)
+* [CURLOPT_SSL_VERIFYHOST](https://curl.se/libcurl/c/CURLOPT_SSL_VERIFYHOST.html)
+* [CURLOPT_SSL_VERIFYPEER](https://curl.se/libcurl/c/CURLOPT_SSL_VERIFYPEER.html)
+* [CURLOPT_SSLCERT](https://curl.se/libcurl/c/CURLOPT_SSLCERT.html)
+* [CURLOPT_SSLKEY](https://curl.se/libcurl/c/CURLOPT_SSLKEY.html)
+* [CURLOPT_SSLCERTTYPE](https://curl.se/libcurl/c/CURLOPT_SSLCERTTYPE.html)
+* [CURLOPT_SSLKEY_BLOB](https://curl.se/libcurl/c/CURLOPT_SSLKEY_BLOB.html)
+* [CURLOPT_SSLCERT_BLOB](https://curl.se/libcurl/c/CURLOPT_SSLCERT_BLOB.html)
+* [CURLOPT_CAINFO](https://curl.se/libcurl/c/CURLOPT_CAINFO.html)
+* [CURLOPT_TIMEOUT](https://curl.se/libcurl/c/CURLOPT_TIMEOUT.html)
+* [CURLOPT_TIMEOUT_MS](https://curl.se/libcurl/c/CURLOPT_TIMEOUT_MS.html)
+* [CURLOPT_TCP_KEEPALIVE](https://curl.se/libcurl/c/CURLOPT_TCP_KEEPALIVE.html)
+* [CURLOPT_TCP_KEEPIDLE](https://curl.se/libcurl/c/CURLOPT_TCP_KEEPIDLE.html)
+* [CURLOPT_CONNECTTIMEOUT](https://curl.se/libcurl/c/CURLOPT_CONNECTTIMEOUT.html)
+* [CURLOPT_CONNECTTIMEOUT_MS](https://curl.se/libcurl/c/CURLOPT_CONNECTTIMEOUT_MS.html)
+* [CURLOPT_USERAGENT](https://curl.se/libcurl/c/CURLOPT_USERAGENT.html)
 
 
 For example,
@@ -261,7 +305,7 @@ For such cases you can set the `CURLOPT_USERAGENT` option
 SELECT http_set_curlopt('CURLOPT_USERAGENT',
                         'Examplebot/2.1 (+http://www.example.com/bot.html) Contact abuse@example.com');
 
-SELECT status, content::json ->> 'user-agent' FROM http_get('http://httpbin.org/user-agent');
+SELECT status, content::json ->> 'user-agent' FROM http_get('http://httpbun.com/user-agent');
 ```
 ```
  status |                         user_agent
@@ -285,11 +329,36 @@ By default a 5 second timeout is set for the completion of a request.  If a diff
 
 ## Installation
 
-### UNIX
+### Debian / Ubuntu apt.postgresql.org
+Replace 17 with your version of PostgreSQL
+```
+apt install postgresql-17-http
+```
+
+### UNIX: Compile from Source
 
 If you have PostgreSQL (>= 9.3) devel packages and CURL devel packages installed (>= 0.7.20), you should have `pg_config` and `curl-config` on your path, so you should be able to just run `make` (or `gmake`), then `make install`, then in your database `CREATE EXTENSION http`.
 
 If you already installed a previous version and you just want to upgrade, then `ALTER EXTENSION http UPDATE`.
+
+#### Compiling for Apt based systems, using apt postgresql packages
+
+Refer to https://wiki.postgresql.org/wiki/Apt for pulling packages from apt.postgresql.org repo
+```
+# replace the postgresql-server-dev-14 with your current version
+sudo apt install postgresql-server-dev-14 libcurl4-openssl-dev make g++
+make
+sudo make install
+```
+
+If there several PostgreSQL installations available, you might need to edit the Makefile before running `make` to something like this:
+
+```
+...
+#PG_CONFIG = pg_config
+PG_CONFIG = /usr/lib/postgresql/14/bin/pg_config
+...
+```
 
 ### Windows
 
@@ -297,7 +366,7 @@ There is a build available at [postgresonline](http://www.postgresonline.com/jou
 
 ## Why This is a Bad Idea
 
-- "What happens if the web page takes a long time to return?" Your SQL call will just wait there until it does. Make sure your web service fails fast.
+- "What happens if the web page takes a long time to return?" Your SQL call will just wait there until it does. Make sure your web service fails fast. Or (dangerous in a different way) run your query within [pg_background](https://github.com/vibhorkum/pg_background).
 - "What if the web page returns junk?" Your SQL call will have to test for junk before doing anything with the payload.
 - "What if the web page never returns?" Set a short timeout, or send a cancel to the request, or just wait forever.
 - "What if a user queries a page they shouldn't?" Restrict function access, or just don't install a footgun like this extension where users can access it.
