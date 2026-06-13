@@ -4,7 +4,7 @@
  * Purpose:  Main file.
  *
  ***********************************************************************
- * Copyright 2015 Paul Ramsey <pramsey@cleverelephant.ca>
+ * Copyright 2025 Paul Ramsey <pramsey@cleverelephant.ca>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
@@ -28,7 +28,7 @@
  ***********************************************************************/
 
 /* Constants */
-#define HTTP_VERSION "1.6.0"
+#define HTTP_VERSION "1.7"
 #define HTTP_ENCODING "gzip"
 #define CURL_MIN_VERSION 0x071400 /* 7.20.0 */
 
@@ -43,6 +43,7 @@
 #include <postgres.h>
 #include <fmgr.h>
 #include <funcapi.h>
+#include <miscadmin.h>
 #include <access/genam.h>
 #include <access/htup.h>
 #include <access/sysattr.h>
@@ -64,6 +65,10 @@
 #include <utils/typcache.h>
 #include <utils/fmgroids.h>
 #include <utils/guc.h>
+
+#if PG_VERSION_NUM >= 170000
+#include <utils/wait_event.h>
+#endif
 
 #if PG_VERSION_NUM >= 90300
 #  include <access/htup_details.h>
@@ -88,7 +93,14 @@
 #include <curl/curl.h>
 
 /* Set up PgSQL */
+#ifdef PG_MODULE_MAGIC_EXT
+PG_MODULE_MAGIC_EXT(
+	.name = "http",
+	.version = HTTP_VERSION
+);
+#else
 PG_MODULE_MAGIC;
+#endif
 
 /* HTTP request methods we support */
 typedef enum {
@@ -102,7 +114,7 @@ typedef enum {
 } http_method;
 
 /* Components (and postitions) of the http_request tuple type */
-enum {
+typedef enum {
 	REQ_METHOD = 0,
 	REQ_URI = 1,
 	REQ_HEADERS = 2,
@@ -111,7 +123,7 @@ enum {
 } http_request_type;
 
 /* Components (and postitions) of the http_response tuple type */
-enum {
+typedef enum {
 	RESP_STATUS = 0,
 	RESP_CONTENT_TYPE = 1,
 	RESP_HEADERS = 2,
@@ -119,7 +131,7 @@ enum {
 } http_response_type;
 
 /* Components (and postitions) of the http_header tuple type */
-enum {
+typedef enum {
 	HEADER_FIELD = 0,
 	HEADER_VALUE = 1
 } http_header_type;
@@ -136,69 +148,71 @@ typedef enum {
 
 /* CURLOPT string/enum value mapping */
 typedef struct {
-	char *curlopt_str;
-	char *curlopt_val;
 	CURLoption curlopt;
 	http_curlopt_type curlopt_type;
 	bool superuser_only;
+	char *curlopt_str;
+	char *curlopt_val;
+	char *curlopt_guc;
 } http_curlopt;
 
 
 /* CURLOPT values we allow user to set at run-time */
 /* Be careful adding these, as they can be a security risk */
 static http_curlopt settable_curlopts[] = {
-	{ "CURLOPT_CAINFO", NULL, CURLOPT_CAINFO, CURLOPT_STRING, false },
-	{ "CURLOPT_TIMEOUT", NULL, CURLOPT_TIMEOUT, CURLOPT_LONG, false },
-	{ "CURLOPT_TIMEOUT_MS", NULL, CURLOPT_TIMEOUT_MS, CURLOPT_LONG, false },
-	{ "CURLOPT_CONNECTTIMEOUT", NULL, CURLOPT_CONNECTTIMEOUT, CURLOPT_LONG, false },
-	{ "CURLOPT_CONNECTTIMEOUT_MS", NULL, CURLOPT_CONNECTTIMEOUT_MS, CURLOPT_LONG, false },
-	{ "CURLOPT_USERAGENT", NULL, CURLOPT_USERAGENT, CURLOPT_STRING, false },
-	{ "CURLOPT_USERPWD", NULL, CURLOPT_USERPWD, CURLOPT_STRING, false },
-	{ "CURLOPT_IPRESOLVE", NULL, CURLOPT_IPRESOLVE, CURLOPT_LONG, false },
+	{ CURLOPT_CAINFO, CURLOPT_STRING, false, "CURLOPT_CAINFO", NULL, NULL },
+	{ CURLOPT_TIMEOUT, CURLOPT_LONG, false, "CURLOPT_TIMEOUT", NULL, NULL },
+	{ CURLOPT_TIMEOUT_MS, CURLOPT_LONG, false, "CURLOPT_TIMEOUT_MS", NULL, NULL },
+	{ CURLOPT_CONNECTTIMEOUT, CURLOPT_LONG, false, "CURLOPT_CONNECTTIMEOUT", NULL, NULL },
+	{ CURLOPT_CONNECTTIMEOUT_MS, CURLOPT_LONG, false, "CURLOPT_CONNECTTIMEOUT_MS", NULL, NULL },
+	{ CURLOPT_USERAGENT, CURLOPT_STRING, false, "CURLOPT_USERAGENT", NULL, NULL },
+	{ CURLOPT_USERPWD, CURLOPT_STRING, false, "CURLOPT_USERPWD", NULL, NULL },
+	{ CURLOPT_IPRESOLVE, CURLOPT_LONG, false, "CURLOPT_IPRESOLVE", NULL, NULL },
 #if LIBCURL_VERSION_NUM >= 0x070903 /* 7.9.3 */
-	{ "CURLOPT_SSLCERTTYPE", NULL, CURLOPT_SSLCERTTYPE, CURLOPT_STRING, false },
+	{ CURLOPT_SSLCERTTYPE, CURLOPT_STRING, false, "CURLOPT_SSLCERTTYPE", NULL, NULL },
 #endif
 #if LIBCURL_VERSION_NUM >= 0x070e01 /* 7.14.1 */
-	{ "CURLOPT_PROXY", NULL, CURLOPT_PROXY, CURLOPT_STRING, false },
-	{ "CURLOPT_PROXYPORT", NULL, CURLOPT_PROXYPORT, CURLOPT_LONG, false },
+	{ CURLOPT_PROXY, CURLOPT_STRING, false, "CURLOPT_PROXY", NULL, NULL },
+	{ CURLOPT_PROXYPORT, CURLOPT_LONG, false, "CURLOPT_PROXYPORT", NULL, NULL },
 #endif
 #if LIBCURL_VERSION_NUM >= 0x071301 /* 7.19.1 */
-	{ "CURLOPT_PROXYUSERNAME", NULL, CURLOPT_PROXYUSERNAME, CURLOPT_STRING, false },
-	{ "CURLOPT_PROXYPASSWORD", NULL, CURLOPT_PROXYPASSWORD, CURLOPT_STRING, false },
+	{ CURLOPT_PROXYUSERNAME, CURLOPT_STRING, false, "CURLOPT_PROXYUSERNAME", NULL, NULL },
+	{ CURLOPT_PROXYPASSWORD, CURLOPT_STRING, false, "CURLOPT_PROXYPASSWORD", NULL, NULL },
 #endif
 #if LIBCURL_VERSION_NUM >= 0x071504 /* 7.21.4 */
-	{ "CURLOPT_TLSAUTH_USERNAME", NULL, CURLOPT_TLSAUTH_USERNAME, CURLOPT_STRING, false },
-	{ "CURLOPT_TLSAUTH_PASSWORD", NULL, CURLOPT_TLSAUTH_PASSWORD, CURLOPT_STRING, false },
-	{ "CURLOPT_TLSAUTH_TYPE", NULL, CURLOPT_TLSAUTH_TYPE, CURLOPT_STRING, false },
+	{ CURLOPT_TLSAUTH_USERNAME, CURLOPT_STRING, false, "CURLOPT_TLSAUTH_USERNAME", NULL, NULL },
+	{ CURLOPT_TLSAUTH_PASSWORD, CURLOPT_STRING, false, "CURLOPT_TLSAUTH_PASSWORD", NULL, NULL },
+	{ CURLOPT_TLSAUTH_TYPE, CURLOPT_STRING, false, "CURLOPT_TLSAUTH_TYPE", NULL, NULL },
 #endif
 #if LIBCURL_VERSION_NUM >= 0x071800 /* 7.24.0 */
-	{ "CURLOPT_DNS_SERVERS", NULL, CURLOPT_DNS_SERVERS, CURLOPT_STRING, false },
+	{ CURLOPT_DNS_SERVERS, CURLOPT_STRING, false, "CURLOPT_DNS_SERVERS", NULL, NULL },
 #endif
 #if LIBCURL_VERSION_NUM >= 0x071900 /* 7.25.0 */
-	{ "CURLOPT_TCP_KEEPALIVE", NULL, CURLOPT_TCP_KEEPALIVE, CURLOPT_LONG, false },
-	{ "CURLOPT_TCP_KEEPIDLE", NULL, CURLOPT_TCP_KEEPIDLE, CURLOPT_LONG, false },
+	{ CURLOPT_TCP_KEEPALIVE, CURLOPT_LONG, false, "CURLOPT_TCP_KEEPALIVE", NULL, NULL },
+	{ CURLOPT_TCP_KEEPIDLE, CURLOPT_LONG, false, "CURLOPT_TCP_KEEPIDLE", NULL, NULL },
 #endif
 #if LIBCURL_VERSION_NUM >= 0x072500 /* 7.37.0 */
-	{ "CURLOPT_SSL_VERIFYHOST", NULL, CURLOPT_SSL_VERIFYHOST, CURLOPT_LONG, false },
-	{ "CURLOPT_SSL_VERIFYPEER", NULL, CURLOPT_SSL_VERIFYPEER, CURLOPT_LONG, false },
+	{ CURLOPT_SSL_VERIFYHOST, CURLOPT_LONG, false, "CURLOPT_SSL_VERIFYHOST", NULL, NULL },
+	{ CURLOPT_SSL_VERIFYPEER, CURLOPT_LONG, false, "CURLOPT_SSL_VERIFYPEER", NULL, NULL },
 #endif
-	{ "CURLOPT_SSLCERT", NULL, CURLOPT_SSLCERT, CURLOPT_STRING, false },
-	{ "CURLOPT_SSLKEY", NULL, CURLOPT_SSLKEY, CURLOPT_STRING, false },
+	{ CURLOPT_SSLCERT, CURLOPT_STRING, false, "CURLOPT_SSLCERT", NULL, NULL },
+	{ CURLOPT_SSLKEY, CURLOPT_STRING, false, "CURLOPT_SSLKEY", NULL, NULL },
 #if LIBCURL_VERSION_NUM >= 0x073400  /* 7.52.0 */
-	{ "CURLOPT_PRE_PROXY", NULL, CURLOPT_PRE_PROXY, CURLOPT_STRING, false },
-	{ "CURLOPT_PROXY_CAINFO", NULL, CURLOPT_PROXY_TLSAUTH_USERNAME, CURLOPT_STRING, false },
-	{ "CURLOPT_PROXY_TLSAUTH_USERNAME", NULL, CURLOPT_PROXY_TLSAUTH_USERNAME, CURLOPT_STRING, false },
-	{ "CURLOPT_PROXY_TLSAUTH_PASSWORD", NULL, CURLOPT_PROXY_TLSAUTH_PASSWORD, CURLOPT_STRING, false },
-	{ "CURLOPT_PROXY_TLSAUTH_TYPE", NULL, CURLOPT_PROXY_TLSAUTH_TYPE, CURLOPT_STRING, false },
+	{ CURLOPT_PRE_PROXY, CURLOPT_STRING, false, "CURLOPT_PRE_PROXY", NULL, NULL },
+	{ CURLOPT_PROXY_TLSAUTH_USERNAME, CURLOPT_STRING, false, "CURLOPT_PROXY_CAINFO", NULL, NULL },
+	{ CURLOPT_PROXY_TLSAUTH_USERNAME, CURLOPT_STRING, false, "CURLOPT_PROXY_TLSAUTH_USERNAME", NULL, NULL },
+	{ CURLOPT_PROXY_TLSAUTH_PASSWORD, CURLOPT_STRING, false, "CURLOPT_PROXY_TLSAUTH_PASSWORD", NULL, NULL },
+	{ CURLOPT_PROXY_TLSAUTH_TYPE, CURLOPT_STRING, false, "CURLOPT_PROXY_TLSAUTH_TYPE", NULL, NULL },
 #endif
 	{ "CURLOPT_USERNAME", NULL, CURLOPT_USERNAME, CURLOPT_STRING, false },
 	{ "CURLOPT_PASSWORD", NULL, CURLOPT_PASSWORD, CURLOPT_STRING, false },
 #if LIBCURL_VERSION_NUM >= 0x074700  /* 7.71.0 */
-	{ "CURLOPT_SSLKEY_BLOB", NULL, CURLOPT_SSLKEY_BLOB, CURLOPT_BLOB, false },
-	{ "CURLOPT_SSLCERT_BLOB", NULL, CURLOPT_SSLCERT_BLOB, CURLOPT_BLOB, false },
+	{ CURLOPT_SSLKEY_BLOB, CURLOPT_BLOB, false, "CURLOPT_SSLKEY_BLOB", NULL, NULL },
+	{ CURLOPT_SSLCERT_BLOB, CURLOPT_BLOB, false, "CURLOPT_SSLCERT_BLOB", NULL, NULL },
 #endif
-	{ NULL, NULL, 0, 0, false } /* Array null terminator */
+	{ 0, 0, false, NULL, NULL, NULL } /* Array null terminator */
 };
+
 
 /* Function signatures */
 void _PG_init(void);
@@ -207,57 +221,49 @@ static size_t http_writeback(void *contents, size_t size, size_t nmemb, void *us
 static size_t http_readback(void *buffer, size_t size, size_t nitems, void *instream);
 
 /* Global variables */
-bool g_use_keepalive;
-int g_timeout_msec;
+static CURL * g_http_handle = NULL;
 
-CURL * g_http_handle = NULL;
-List * g_curl_opts = NIL;
+#if PG_VERSION_NUM >= 170000
+static uint32 wait_event_transfer = 0;
+#endif
 
 /*
-* Interrupt support is dependent on CURLOPT_XFERINFOFUNCTION which is
-* only available from 7.32.0 and up
+* Interrupt support is dependent on CURLOPT_XFERINFOFUNCTION which
+* is only available from 7.39.0 and up
 */
 #if LIBCURL_VERSION_NUM >= 0x072700 /* 7.39.0 */
 
-pqsigfunc pgsql_interrupt_handler = NULL;
-int http_interrupt_requested = 0;
-
 /*
 * To support request interruption, we have libcurl run the progress meter
-* callback frequently, and here we watch to see if PgSQL has flipped our
-* global 'http_interrupt_requested' flag. If it has been flipped,
-* the non-zero return value will cue libcurl to abort the transfer,
-* leading to a CURLE_ABORTED_BY_CALLBACK return on the curl_easy_perform()
+* callback frequently, and here we watch to see if PgSQL has flipped
+* the global QueryCancelPending || ProcDiePending flags.
+* Curl should then return CURLE_ABORTED_BY_CALLBACK
+* to the curl_easy_perform() call.
 */
 static int
 http_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
 {
 #ifdef WIN32
 	if (UNBLOCKED_SIGNAL_QUEUE())
-	{
 		pgwin32_dispatch_queued_signals();
-	}
 #endif
-	/* elog(DEBUG3, "http_interrupt_requested = %d", http_interrupt_requested); */
-	return http_interrupt_requested;
+	/* Check the PgSQL global flags */
+	return QueryCancelPending || ProcDiePending;
 }
 
-/*
-* We register this callback with the PgSQL signal handler to
-* capture SIGINT and set our local interupt flag so that
-* libcurl will eventually notice that a cancel is requested
-*/
-static void
-http_interrupt_handler(int sig)
-{
-	/* Handle the signal here */
-	elog(DEBUG2, "http_interrupt_handler: sig=%d", sig);
-	http_interrupt_requested = sig;
-	pgsql_interrupt_handler(sig);
-	return;
-}
 #endif /* 7.39.0 */
 
+/*
+* In theory bringing memory handling inside the PgSQL
+* memory manager makes sense, but in practice the lifecycle
+* PgSQL is using is out of sync with the one curl is
+* using, so PgSQL might free a block of memory out
+* from under curl. If connection persistence was
+* removed, it would be possible to do this where curl
+* was entirely setup/connect/disconnect/shutdown
+* within a single function call. As it currently
+* stands, enabling this just causes crashes.
+*/
 #undef HTTP_MEM_CALLBACKS
 #ifdef HTTP_MEM_CALLBACKS
 static void *
@@ -295,32 +301,150 @@ http_malloc(size_t sz)
 #endif
 
 
+static char *
+http_strtolower(const char *input)
+{
+	char *ptr, *output;
+	if (input == NULL)
+		return NULL;
+
+	/* Allocate memory for the output string */
+	output = palloc(strlen(input) + 1);
+	ptr = output;
+
+	while (*input)
+	{
+		*ptr++ = tolower((unsigned char) *input);
+		input++;
+	}
+
+	*ptr = '\0';  // Null-terminate the string
+	return output;
+}
+
+
+#if PG_VERSION_NUM < 160000
+static void *
+guc_malloc(int elevel, size_t size)
+{
+	void	   *data;
+
+	/* Avoid unportable behavior of malloc(0) */
+	if (size == 0)
+		size = 1;
+	data = malloc(size);
+	if (data == NULL)
+		ereport(elevel,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of memory")));
+	return data;
+}
+
+static char *
+guc_strdup(int elevel, const char *src)
+{
+	size_t len = strlen(src) + 1;
+	char *dup = guc_malloc(elevel, len);
+	memcpy(dup, src, len);
+	return dup;
+}
+
+static void
+guc_free(void *ptr)
+{
+	free(ptr);
+}
+#endif
+
+
+static void
+http_guc_init_opt(http_curlopt *opt)
+{
+	char *opt_name_lower = http_strtolower(opt->curlopt_str);
+	char *opt_name = psprintf("http.%s", opt_name_lower);
+
+	const char *url_tmpl = "https://curl.se/libcurl/c/%s.html";
+	char *opt_url = psprintf(url_tmpl, opt->curlopt_str);
+	opt->curlopt_guc = guc_strdup(ERROR, opt_name);
+
+	DefineCustomStringVariable(
+		opt_name, // const char *name
+		guc_strdup(ERROR, opt_url),  // const char *short_desc
+		NULL,     // const char *long_desc
+		&(opt->curlopt_val), // char **valueAddr
+		NULL, // const char *bootValue
+		opt->superuser_only ? PGC_SUSET : PGC_USERSET, // GucContext context
+		0,    // int flags
+		NULL, // GucStringCheckHook check_hook
+		NULL, // GucStringAssignHook assign_hook
+		NULL  // GucShowHook show_hook
+		);
+
+	pfree(opt_name_lower);
+	pfree(opt_name);
+	pfree(opt_url);
+
+	/*
+	 * Backwards compatibility, retain the old GUC
+	 * http.keepalive name for now.
+	 */
+	if (opt->curlopt == CURLOPT_TCP_KEEPALIVE)
+	{
+		DefineCustomStringVariable(
+			"http.keepalive",
+			guc_strdup(ERROR, "https://curl.se/libcurl/c/CURLOPT_TCP_KEEPALIVE.html"),
+			NULL,
+			&(opt->curlopt_val),
+			NULL,
+			opt->superuser_only ? PGC_SUSET : PGC_USERSET,
+			0, NULL, NULL, NULL
+			);
+	}
+
+	/*
+	 * Backwards compatibility, retain the old GUC
+	 * http.timeout_msec name for now.
+	 */
+	if (opt->curlopt == CURLOPT_TIMEOUT_MS)
+	{
+		DefineCustomStringVariable(
+			"http.timeout_msec",
+			guc_strdup(ERROR, "https://curl.se/libcurl/c/CURLOPT_TIMEOUT_MS.html"),
+			NULL,
+			&(opt->curlopt_val),
+			NULL,
+			opt->superuser_only ? PGC_SUSET : PGC_USERSET,
+			0, NULL, NULL, NULL
+			);
+	}
+}
+
+static void
+http_guc_init()
+{
+	http_curlopt *opt = settable_curlopts;
+	while (opt->curlopt)
+	{
+		http_guc_init_opt(opt);
+		opt++;
+	}
+}
+
+
 /* Startup */
 void _PG_init(void)
 {
-	DefineCustomBoolVariable("http.keepalive",
-							 "reuse existing connections with keepalive",
-							 NULL,
-							 &g_use_keepalive,
-							 false,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL,
-							 NULL,
-							 NULL);
 
-	DefineCustomIntVariable("http.timeout_msec",
-							"request completion timeout in milliseconds",
-							NULL,
-							&g_timeout_msec,
-							0,
-							0,
-							INT_MAX,
-							PGC_USERSET,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_MS,
-							NULL,
-							NULL,
-							NULL);
+	/*
+	 * Initialize the DefineCustomStringVariable GUC
+	 * functions to allow "SET http.curlopt_var = value"
+	 * to manipulate CURL options.
+	 */
+	http_guc_init();
+
+#if PG_VERSION_NUM >= 170000
+	wait_event_transfer = WaitEventExtensionNew("HttpTransfer");
+#endif
 
 #ifdef HTTP_MEM_CALLBACKS
 	/*
@@ -340,23 +464,11 @@ void _PG_init(void)
 #endif
 
 
-#if LIBCURL_VERSION_NUM >= 0x072700 /* 7.39.0 */
-	/* Register our interrupt handler (http_handle_interrupt) */
-	/* and store the existing one so we can call it when we're */
-	/* through with our work */
-	pgsql_interrupt_handler = pqsignal(SIGINT, http_interrupt_handler);
-	http_interrupt_requested = 0;
-#endif
 }
 
 /* Tear-down */
 void _PG_fini(void)
 {
-#if LIBCURL_VERSION_NUM >= 0x072700
-	/* Re-register the original signal handler */
-	pqsignal(SIGINT, pgsql_interrupt_handler);
-#endif
-
 	if (g_http_handle)
 	{
 		curl_easy_cleanup(g_http_handle);
@@ -677,12 +789,12 @@ typname_get_tupledesc(const char *extname, const char *typname)
 
 #if PG_VERSION_NUM >= 120000
 	typoid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
-	               PointerGetDatum(typname),
-	               ObjectIdGetDatum(extschemaoid));
+	            PointerGetDatum(typname),
+	            ObjectIdGetDatum(extschemaoid));
 #else
 	typoid = GetSysCacheOid2(TYPENAMENSP,
-	               PointerGetDatum(typname),
-	               ObjectIdGetDatum(extschemaoid));
+	            PointerGetDatum(typname),
+	            ObjectIdGetDatum(extschemaoid));
 #endif
 
 	if ( OidIsValid(typoid) )
@@ -785,9 +897,24 @@ http_check_curl_version(const curl_version_info_data *version_info)
 
 	if ( version_info->version_num < CURL_MIN_VERSION )
 	{
-		elog(ERROR, "pgsql-http requires Curl version 0.7.20 or higher");
+		elog(ERROR, "pgsql-http requires Curl version 7.20.0 or higher");
 	}
 }
+
+
+static bool
+curlopt_is_set(CURLoption curlopt)
+{
+	http_curlopt *opt = settable_curlopts;
+	while (opt->curlopt)
+	{
+		if (opt->curlopt == curlopt && opt->curlopt_val)
+			return true;
+		opt++;
+	}
+	return false;
+}
+
 
 static bool
 set_curlopt(CURL* handle, const http_curlopt *opt)
@@ -801,7 +928,7 @@ set_curlopt(CURL* handle, const http_curlopt *opt)
 	if (opt->curlopt_type == CURLOPT_STRING)
 	{
 		err = curl_easy_setopt(handle, opt->curlopt, opt->curlopt_val);
-		elog(DEBUG2, "pgsql-http: set '%s' to value '%s', return value = %d", opt->curlopt_str, opt->curlopt_val, err);
+		elog(DEBUG2, "pgsql-http: set '%s' to value '%s', return value = %d", opt->curlopt_guc, opt->curlopt_val, err);
 	}
 	/* Argument is a long */
 	else if (opt->curlopt_type == CURLOPT_LONG)
@@ -810,11 +937,12 @@ set_curlopt(CURL* handle, const http_curlopt *opt)
 		errno = 0;
 		value_long = strtol(opt->curlopt_val, NULL, 10);
 		if ( errno == EINVAL || errno == ERANGE )
-			elog(ERROR, "invalid integer provided for '%s'", opt->curlopt_str);
+			elog(ERROR, "invalid integer provided for '%s'", opt->curlopt_guc);
 
 		err = curl_easy_setopt(handle, opt->curlopt, value_long);
-		elog(DEBUG2, "pgsql-http: set '%s' to value '%ld', return value = %d", opt->curlopt_str, value_long, err);
+		elog(DEBUG2, "pgsql-http: set '%s' to value '%ld', return value = %d", opt->curlopt_guc, value_long, err);
 	}
+#if LIBCURL_VERSION_NUM >= 0x074700 /* 7.71.0 */
 	/* Only used for CURLOPT_SSLKEY_BLOB and CURLOPT_SSLCERT_BLOB */
 	else if (opt->curlopt_type == CURLOPT_BLOB)
 	{
@@ -827,12 +955,13 @@ set_curlopt(CURL* handle, const http_curlopt *opt)
 		elog(DEBUG2, "pgsql-http: set 'CURLOPT_SSLKEYTYPE' to value 'PEM', return value = %d", err);
 
 		err = curl_easy_setopt(handle, opt->curlopt, &blob);
-		elog(DEBUG2, "pgsql-http: set '%s' to value '%s', return value = %d", opt->curlopt_str, opt->curlopt_val, err);
+		elog(DEBUG2, "pgsql-http: set '%s' to value '%s', return value = %d", opt->curlopt_guc, opt->curlopt_val, err);
 	}
+#endif
 	else
 	{
 		/* Never get here */
-		elog(ERROR, "invalid curlopt_type");
+		elog(ERROR, "invalid curlopt_type, '%d'", opt->curlopt_type);
 	}
 
 	if ( err != CURLE_OK )
@@ -847,21 +976,20 @@ set_curlopt(CURL* handle, const http_curlopt *opt)
 static CURL *
 http_get_handle()
 {
-	http_curlopt opt;
 	CURL *handle = g_http_handle;
-	size_t i = 0;
+	http_curlopt *opt = settable_curlopts;
 
 	/* Initialize the global handle if needed */
 	if (!handle)
 	{
 		handle = curl_easy_init();
+		if (!handle)
+			ereport(ERROR, (errmsg("Unable to initialize CURL")));
 	}
-	/* Always reset because we are going to fill in the user */
-	/* set options down below */
-	else
-	{
-		curl_easy_reset(handle);
-	}
+
+	/* Always reset so GUC-supplied options (e.g. tiny timeouts) are
+	 * reliably enforced on both new and reused handles. */
+	curl_easy_reset(handle);
 
 	/* Always want a default fast (1 second) connection timeout */
 	/* User can over-ride with http_set_curlopt() if they wish */
@@ -871,17 +999,13 @@ http_get_handle()
 	/* Set the user agent. If not set, use PG_VERSION as default */
 	curl_easy_setopt(handle, CURLOPT_USERAGENT, PG_VERSION_STR);
 
-	if (!handle)
-		ereport(ERROR, (errmsg("Unable to initialize CURL")));
-
 	/* Bring in any options the user has set this session */
-	while (1)
+	while (opt->curlopt)
 	{
-		opt = settable_curlopts[i++];
-		if (!opt.curlopt_str) break;
 		/* Option value is already set */
-		if (opt.curlopt_val)
-			set_curlopt(handle, &opt);
+		if (opt->curlopt_val)
+			set_curlopt(handle, opt);
+		opt++;
 	}
 
 	g_http_handle = handle;
@@ -896,18 +1020,17 @@ Datum http_reset_curlopt(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(http_reset_curlopt);
 Datum http_reset_curlopt(PG_FUNCTION_ARGS)
 {
-	size_t i = 0;
+	http_curlopt *opt = settable_curlopts;
 	/* Set up global HTTP handle */
 	CURL * handle = http_get_handle();
 	curl_easy_reset(handle);
 
 	/* Clean out the settable_curlopts global cache */
-	while (1)
+	while (opt->curlopt)
 	{
-		http_curlopt *opt = settable_curlopts + i++;
-		if (!opt->curlopt_str) break;
-		if (opt->curlopt_val) pfree(opt->curlopt_val);
+		if (opt->curlopt_val) guc_free(opt->curlopt_val);
 		opt->curlopt_val = NULL;
+		opt++;
 	}
 
 	PG_RETURN_BOOL(true);
@@ -935,8 +1058,8 @@ Datum http_list_curlopt(PG_FUNCTION_ARGS)
 		state = palloc0(sizeof(*state));
 		funcctx->user_fctx = state;
 		if(get_call_result_type(fcinfo, 0, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
-			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				errmsg("composite-returning function called in context that cannot accept a composite")));
+		    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		    errmsg("composite-returning function called in context that cannot accept a composite")));
 
 		BlessTupleDesc(funcctx->tuple_desc);
 		MemoryContextSwitchTo(oldcontext);
@@ -975,10 +1098,10 @@ Datum http_set_curlopt(PG_FUNCTION_ARGS);
 PG_FUNCTION_INFO_V1(http_set_curlopt);
 Datum http_set_curlopt(PG_FUNCTION_ARGS)
 {
-	size_t i = 0;
 	char *curlopt, *value;
 	text *curlopt_txt, *value_txt;
 	CURL *handle;
+	http_curlopt *opt = settable_curlopts;
 
 	/* Version check */
 	http_check_curl_version(curl_version_info(CURLVERSION_NOW));
@@ -996,16 +1119,15 @@ Datum http_set_curlopt(PG_FUNCTION_ARGS)
 	curlopt = text_to_cstring(curlopt_txt);
 	value = text_to_cstring(value_txt);
 
-	while (1)
+	while (opt->curlopt)
 	{
-		http_curlopt *opt = settable_curlopts + i++;
-		if (!opt->curlopt_str) break;
 		if (strcasecmp(opt->curlopt_str, curlopt) == 0)
 		{
-			if (opt->curlopt_val) pfree(opt->curlopt_val);
-			opt->curlopt_val = MemoryContextStrdup(CacheMemoryContext, value);
+			if (opt->curlopt_val) guc_free(opt->curlopt_val);
+			opt->curlopt_val = guc_strdup(ERROR, value);
 			PG_RETURN_BOOL(set_curlopt(handle, opt));
 		}
+		opt++;
 	}
 
 	elog(ERROR, "curl option '%s' is not available for run-time configuration", curlopt);
@@ -1052,11 +1174,6 @@ Datum http_request(PG_FUNCTION_ARGS)
 
 	/* Output */
 	HeapTuple tuple_out;
-
-#if LIBCURL_VERSION_NUM >= 0x072700 /* 7.39.0 */
-	/* Set up the interrupt flag */
-	http_interrupt_requested = 0;
-#endif
 
 	/* Version check */
 	http_check_curl_version(curl_version_info(CURLVERSION_NOW));
@@ -1127,8 +1244,7 @@ Datum http_request(PG_FUNCTION_ARGS)
 	CURL_SETOPT(g_http_handle, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
 #endif
 
-
-	if ( g_use_keepalive )
+	if ( curlopt_is_set(CURLOPT_TCP_KEEPALIVE) )
 	{
 		/* Keep sockets held open */
 		CURL_SETOPT(g_http_handle, CURLOPT_FORBID_REUSE, 0);
@@ -1154,10 +1270,6 @@ Datum http_request(PG_FUNCTION_ARGS)
 	CURL_SETOPT(g_http_handle, CURLOPT_NOPROGRESS, 0);
 #endif
 
-	/* Set up the HTTP timeout */
-	if (g_timeout_msec > 0)
-		CURL_SETOPT(g_http_handle, CURLOPT_TIMEOUT_MS, g_timeout_msec);
-
 	/* Set the HTTP content encoding to all curl supports */
 	CURL_SETOPT(g_http_handle, CURLOPT_ACCEPT_ENCODING, "");
 
@@ -1168,7 +1280,7 @@ Datum http_request(PG_FUNCTION_ARGS)
 		CURL_SETOPT(g_http_handle, CURLOPT_MAXREDIRS, 5);
 	}
 
-	if ( g_use_keepalive )
+	if ( curlopt_is_set(CURLOPT_TCP_KEEPALIVE) )
 	{
 		/* Add a keep alive option to the headers to reuse network sockets */
 		headers = curl_slist_append(headers, "Connection: Keep-Alive");
@@ -1226,7 +1338,8 @@ Datum http_request(PG_FUNCTION_ARGS)
 				CURL_SETOPT(g_http_handle, CURLOPT_CUSTOMREQUEST, "DELETE");
 			}
 
-			CURL_SETOPT(g_http_handle, CURLOPT_POSTFIELDS, text_to_cstring(content_text));
+			CURL_SETOPT(g_http_handle, CURLOPT_POSTFIELDS, (char *)(VARDATA(content_text)));
+			CURL_SETOPT(g_http_handle, CURLOPT_POSTFIELDSIZE, content_size);
 		}
 		else if ( method == HTTP_PUT || method == HTTP_PATCH || method == HTTP_UNKNOWN )
 		{
@@ -1272,10 +1385,20 @@ Datum http_request(PG_FUNCTION_ARGS)
 	/* Set the headers */
 	CURL_SETOPT(g_http_handle, CURLOPT_HTTPHEADER, headers);
 
+#if PG_VERSION_NUM >= 170000
+	/* Set up wait event tracking */
+	pgstat_report_wait_start(wait_event_transfer);
+#endif
+
 	/*************************************************************************
 	* PERFORM THE REQUEST!
 	**************************************************************************/
 	http_return = curl_easy_perform(g_http_handle);
+
+#if PG_VERSION_NUM >= 170000
+	pgstat_report_wait_end();
+#endif
+
 	elog(DEBUG2, "pgsql-http: queried '%s'", uri);
 	elog(DEBUG2, "pgsql-http: http_return '%d'", http_return);
 
@@ -1298,19 +1421,10 @@ Datum http_request(PG_FUNCTION_ARGS)
 #if LIBCURL_VERSION_NUM >= 0x072700 /* 7.39.0 */
 		/*
 		* If the request was aborted by an interrupt request
-		* we need to ensure that the interrupt signal
-		* is in turn sent to the downstream interrupt handler
-		* that we stored when we set up our own handler.
+		* report back.
 		*/
-		if (http_return == CURLE_ABORTED_BY_CALLBACK &&
-			pgsql_interrupt_handler &&
-			http_interrupt_requested)
-		{
-			elog(DEBUG2, "calling pgsql_interrupt_handler");
-			(*pgsql_interrupt_handler)(http_interrupt_requested);
-			http_interrupt_requested = 0;
-			elog(ERROR, "HTTP request cancelled");
-		}
+		if (http_return == CURLE_ABORTED_BY_CALLBACK)
+			elog(ERROR, "canceling statement due to user request");
 #endif
 
 		http_error(http_return, http_error_buffer);
@@ -1327,10 +1441,10 @@ Datum http_request(PG_FUNCTION_ARGS)
 	}
 
 	/* Prepare our return object */
-    if (get_call_result_type(fcinfo, 0, &tup_desc) != TYPEFUNC_COMPOSITE) {
-        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-            errmsg("%s called with incompatible return type", __func__)));
-    }
+	if (get_call_result_type(fcinfo, 0, &tup_desc) != TYPEFUNC_COMPOSITE) {
+	    ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+	        errmsg("%s called with incompatible return type", __func__)));
+	}
 
 	ncolumns = tup_desc->natts;
 	values = palloc0(sizeof(Datum)*ncolumns);
@@ -1423,7 +1537,7 @@ Datum http_request(PG_FUNCTION_ARGS)
 
 	/* Clean up */
 	ReleaseTupleDesc(tup_desc);
-	if ( !g_use_keepalive )
+	if ( ! curlopt_is_set(CURLOPT_TCP_KEEPALIVE) )
 	{
 		curl_easy_cleanup(g_http_handle);
 		g_http_handle = NULL;
@@ -1581,11 +1695,11 @@ Datum urlencode_jsonb(PG_FUNCTION_ARGS)
 			/* Read the value for this key */
 #if PG_VERSION_NUM < 130000
 			{
-			    JsonbValue  k;
-			    k.type = jbvString;
-			    k.val.string.val = key;
-			    k.val.string.len = strlen(key);
-			    v = *findJsonbValueFromContainer(&jb->root, JB_FOBJECT, &k);
+				JsonbValue  k;
+				k.type = jbvString;
+				k.val.string.val = key;
+				k.val.string.len = strlen(key);
+				v = *findJsonbValueFromContainer(&jb->root, JB_FOBJECT, &k);
 			}
 #else
 			getKeyJsonValueFromContainer(&jb->root, key, strlen(key), &v);
